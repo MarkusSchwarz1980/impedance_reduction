@@ -54,6 +54,9 @@ class ImpedanceReduction():
             elif np.round(self.L/0.374) == 54.0:
                 self.lpf_par1 = 2.0
                 self.lpf_par2 = 0.66
+            elif np.round(self.L/0.374) == 32.0:
+                self.lpf_par1 = 3.0
+                self.lpf_par2 = 0.66
             else:
                 raise RuntimeError('Cavity not recognized')
             
