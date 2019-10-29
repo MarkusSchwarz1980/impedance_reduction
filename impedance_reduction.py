@@ -76,11 +76,8 @@ class ImpedanceReduction():
             self.glp = self.ghp/30  # low-pass filter gain [1]
             
         # set minimum and maximum of affected frequencies to be +/-delta_f/2
-        self.min_freq = self.freq_center - self.delta_f/2
-        self.max_freq = self.freq_center + self.delta_f/2
-        self.cond1 = self.frequencies <= self.max_freq
-        self.cond2 = self.frequencies >= self.min_freq
-        self.affected_indices = np.where(self.cond1*self.cond2)
+        self.affected_indices = np.where(
+                np.abs(self.frequencies - self.freq_center) <= self.delta_f/2)
         
         if filter_type == 'none':
             self.affected_indices = np.where(False)
@@ -101,6 +98,7 @@ class ImpedanceReduction():
         else:
             raise RuntimeError('Filter type '+str(filter_type)+
                     ' not recognized! Must be: fb_reduction or none')
+        self.reduction_factor[np.argwhere(self.time<self.start_time)] = 0
         
     #end __init__
     
@@ -110,6 +108,7 @@ class ImpedanceReduction():
     # contains filter and impedance reduction
     def fb_filter(self,f):
         z = np.exp(np.pi*2j*(f-self.freq_center)/self.f_clock)
+#        z = np.exp(np.pi*2j*f/self.f_clock)
         self.z = z
         
         # caution: np.sinc(x) = sin(pi*x)/(pi*x)
@@ -121,6 +120,7 @@ class ImpedanceReduction():
 #        H_comb = (1-self.a)/(1-self.a*z**-self.N) * z**-self.N
         H_comb = 1
         self.H_comb = H_comb
+#        print(np.mean(self.H_comb), np.min(self.H_comb), np.max(self.H_comb))
         
         H_lp = self.glp/self.M * (1-z**-self.M)/(1-z**(-1)) * z**((self.M-1)/2)
         self.H_lp = H_lp
@@ -146,13 +146,13 @@ class ImpedanceReduction():
 ### SPS --- Impedance reduction definition
 class ImpedanceReduction2():
     def __init__(self, Ring, RFStation, 
-                 TravelingWaveCavity, filter_type, center_frequency, bandwidth,
+                 InducedVoltageFreq, filter_type, center_frequency, bandwidth,
                  time_constant, cavity_length, start_time = -1, FB_strength = 1):
         self.time = Ring.cycle_time
         self.counter = RFStation.counter
-        self.frequencies = np.copy(TravelingWaveCavity.frequency_array)
-        self.impedance = np.copy(TravelingWaveCavity.impedance)
-        self.initial_impedance = np.copy(TravelingWaveCavity.impedance)
+        self.frequencies = InducedVoltageFreq.freq
+        self.impedance = InducedVoltageFreq.total_impedance
+        self.initial_impedance = deepcopy(InducedVoltageFreq.total_impedance)
         self.freq_center = center_frequency
         self.delta_f = bandwidth
         self.FB_time = time_constant
@@ -162,52 +162,58 @@ class ImpedanceReduction2():
         else:
             self.start_time = start_time
         
-        if filter_type == 'fb_reduction':
-#            self.L = 43*0.374   # cavity length [m]
-            self.L = cavity_length # cavity length [m]
-            self.vg = 0.0946*c  # group velocity [m/s]
             self.v = -Ring.beta[0,0]*c # particle speed [m/s]
-            self.R2 = 27.1e3    # series impedance [Ohm/m^2]
+            self.L = cavity_length # cavity length [m]
             self.Z0 = 50        # characteristic impedance [Ohm]
             self.N = 924        # comb filter parameter, samplings per turn [1]
             self.a = 15/16      # comb filter parameter, bandwidth [1]
-            # filter clock [Hz]
-            self.f_clock = self.N * Ring.f_rev[0]
+            self.f_clock = self.N * Ring.f_rev[0]  # filter clock [Hz]
             self.b = 1/2        # high-pass filter parameter [1]
-            # high-pass filter parameter [1] M=25 for 4-sections
-            self.M = int(np.round(2*(self.L*(1+self.vg/c)/(2*self.vg))
-                                    * self.f_clock))
-            self.ghp = 3        # high-pass filter gain [1]
-            self.glp = self.ghp/30  # low-pass filter gain [1]
             self.k = 1/120      # open-loop gain
             
-            if np.round(self.L/0.374) == 43.0:
-                self.lpf_par1 = 2.6
-                self.lpf_par2 = 0.7
-            elif np.round(self.L/0.374) == 54.0:
-                self.lpf_par1 = 2.0
+            if int(np.rint(center_frequency / 200.222e6)) == 1:  # fundamental
+                self.vg = 0.0946*c  # group velocity [m/s]
+                self.R2 = 27.1e3    # series impedance [Ohm/m^2]
+                # high-pass filter parameter [1] M=25 for 4-sections
+                self.M = int(np.round(2*(self.L*(1+self.vg/c)/(2*self.vg))
+                                        * self.f_clock))
+                self.ghp = 3        # high-pass filter gain [1]
+                
+                if np.round(self.L/0.374) == 43.0:
+                    self.lpf_par1 = 2.6
+                    self.lpf_par2 = 0.7
+                elif np.round(self.L/0.374) == 54.0:
+                    self.lpf_par1 = 2.0
+                    self.lpf_par2 = 0.66
+                elif np.round(self.L/0.374) == 32.0:
+                    self.lpf_par1 = 3.0
+                    self.lpf_par2 = 0.66
+                else:
+                    raise RuntimeError('Cavity not recognized')
+            
+            elif int(np.rint(center_frequency / 200.222e6)) == 4:  # 800MHz
+                self.vg = 0.0388574*c  # [P. Kramer, priv. comm. 2019]
+                self.R2 = 0.647e6  # [Ohm/m^2]; T.Bohl Note-2004-06 (v01.12 2009-05-05)
+                # -26dB reduction in first lope [P. Baudrenghien, priv. comm. 2019]
+                # high-pass filter parameter, M=14 for 800MHz TWC
+                self.M = int(np.round(2*(self.L*(1+self.vg/c)/(2*self.vg))
+                                        * self.f_clock))
+                self.ghp = 10
+                self.lpf_par1 = 1.0
                 self.lpf_par2 = 0.66
-            elif np.round(self.L/0.374) == 32.0:
-                self.lpf_par1 = 3.0
-                self.lpf_par2 = 0.66
+            
             else:
                 raise RuntimeError('Cavity not recognized')
             
-        # set minimum and maximum of affected frequencies to be 5*delta_f/2
-        # and test that you don't under-/overshoot
-        if (self.freq_center - 5*self.delta_f/2) < 0: 
-            self.min_freq = 0.0
-        else:
-            self.min_freq = self.freq_center - 5*self.delta_f/2 # [Hz]
-        if (self.freq_center + 5*self.delta_f/2) > max(self.frequencies):
-            self.max_freq = max(self.frequencies)
-        else:
-            self.max_freq = self.freq_center + 5*self.delta_f/2 # [Hz]
-        self.cond1 = np.abs(self.frequencies) <= self.max_freq
-        self.cond2 = np.abs(self.frequencies) >= self.min_freq
-        self.affected_indices = np.where(self.cond1*self.cond2)
-#        self.affected_indices = np.where(np.abs(self.frequencies) <=self.max_freq - self.min_freq)
-        
+            self.glp = self.ghp/30  # low-pass filter gain [1]
+            
+        # set minimum and maximum of affected frequencies to be +/-delta_f/2
+#        self.affected_indices = np.where(
+#                np.abs(self.frequencies - self.freq_center) <= self.delta_f/2)
+#        self.affected_indices += np.where(
+#                np.abs(self.frequencies + self.freq_center) <= self.delta_f/2)
+        self.affected_indices = (np.abs(self.frequencies - self.freq_center) <= self.delta_f/2) \
+            + (np.abs(self.frequencies + self.freq_center) <= self.delta_f/2)
         if filter_type == 'none':
             self.affected_indices = np.where(False)
             self.filter_func =  self.none_filter(
@@ -225,7 +231,7 @@ class ImpedanceReduction2():
         elif filter_type =='fb_reduction':
             self.reduction_factor = \
                 1-np.exp(-(self.time-start_time)/self.FB_time)
-            self.reduction_factor[np.argwhere(self.time<self.start_time)] = 0
+        self.reduction_factor[np.argwhere(self.time<self.start_time)] = 0
     #end __init__
     
     def none_filter(self,x,x0,delta_x):
@@ -251,6 +257,7 @@ class ImpedanceReduction2():
         H_comb = (1-self.a)/(1-self.a*z**-self.N) * z**-self.N
 #        H_comb = 1
         self.H_comb = H_comb
+#        print(np.mean(self.H_comb), np.min(self.H_comb), np.max(self.H_comb))
         
         H_lp = self.glp/self.M * (1-z**-self.M)/(1-1/z) * z**((self.M-1)/2)
         self.H_lp = H_lp
